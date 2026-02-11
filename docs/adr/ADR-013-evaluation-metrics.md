@@ -119,6 +119,34 @@ These metrics ensure the system is usable in an interactive clinical workflow.
 | Gradio UI time-to-interactive | Measured from scan upload to first displayed slice | <= 10 s |
 | Total memory footprint (CPU RAM) | `psutil.Process().memory_info().rss` | <= 8 GB |
 
+### Database & Vector Search Metrics
+
+These metrics evaluate the performance of the RuVector+PostgreSQL persistence and
+vector intelligence layer to ensure it meets interactive latency requirements and
+demonstrates production readiness.
+
+| Metric | Measurement Method | Target |
+|--------|-------------------|--------|
+| RuVector search latency (p50, p95) | Timed wrapper around vector search | p50 < 5ms, p95 < 20ms |
+| RuVector batch insert throughput | Time 1000 vector inserts | > 5000 vectors/sec |
+| PostgreSQL query latency | Timed SQL queries | p50 < 10ms |
+| GNN improvement over baseline | Compare match accuracy with/without GNN | Report improvement % |
+| Hybrid search precision@k | Fraction of top-k results relevant | >= 0.80 at k=10 |
+| Similar case retrieval quality | Manual review of top-5 similar cases | >= 4/5 relevant |
+
+**Evaluation protocol:**
+
+- RuVector search latency is measured over 100 repeated queries with a warm cache,
+  using realistic lesion embedding vectors (768-dimensional).
+- Batch insert throughput is measured by inserting 1000 embedding vectors with
+  associated metadata in a single batch operation.
+- PostgreSQL query latency is measured on indexed audit log queries (by session,
+  by action type, by timestamp range).
+- GNN improvement is measured by comparing lesion match accuracy (Layer 2 metrics)
+  with and without GNN-enhanced retrieval, using the same test set.
+- Hybrid search precision@k is measured by combining vector similarity with graph
+  relationship queries and manually evaluating the relevance of top-10 results.
+
 ### Response Categorization (MedGemma Reasoning)
 
 Evaluate the quality of MedGemma-generated RECIST classifications and narratives.
@@ -172,6 +200,11 @@ The notebook `notebooks/evaluation.ipynb` is organized as follows:
 5. Product Metrics
    5.1 Runtime Benchmarks
    5.2 Memory Profiling
+   5.3 Database Performance
+       5.3.1 RuVector Search Latency
+       5.3.2 Batch Insert Throughput
+       5.3.3 PostgreSQL Query Performance
+       5.3.4 GNN Learning Curve
 6. Response Categorization
    6.1 RECIST Agreement
    6.2 Confusion Matrix and Kappa
@@ -192,6 +225,7 @@ The notebook `notebooks/evaluation.ipynb` is organized as follows:
 | pandas | Tabular metric aggregation and reporting | >= 2.1 |
 | numpy | Numerical computation | >= 1.26 |
 | scipy | Statistical tests, bootstrap | >= 1.11 |
+| ruvector | Vector search benchmarking, batch insert timing | >= 0.1 |
 
 ## Consequences
 
@@ -205,6 +239,10 @@ The notebook `notebooks/evaluation.ipynb` is organized as follows:
   the risk of overstating the prototype's capabilities.
 - **Actionable during development.** Developers can run individual notebook sections to
   get fast feedback on the subsystem they are working on.
+- **Database benchmarks demonstrate production readiness.** Quantified RuVector search
+  latency, batch throughput, and PostgreSQL query performance provide evidence that the
+  persistence layer meets interactive latency requirements and can scale beyond the
+  hackathon prototype.
 
 ### Negative
 

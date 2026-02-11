@@ -105,12 +105,21 @@ Hackaton-MedGemma/
 |       |   |-- state.py            # Session state management
 |       |
 |       |-- common/
+|       |   |-- __init__.py
+|       |   |-- types.py            # Core dataclasses: Patient, Lesion, TimePoint, etc.
+|       |   |-- protocols.py        # Shared Protocol definitions
+|       |   |-- constants.py        # Magic numbers, RECIST thresholds, config defaults
+|       |   |-- logging.py          # Structured logging setup
+|       |   |-- exceptions.py       # Domain-specific exception hierarchy
+|       |
+|       |-- storage/
 |           |-- __init__.py
-|           |-- types.py            # Core dataclasses: Patient, Lesion, TimePoint, etc.
-|           |-- protocols.py        # Shared Protocol definitions
-|           |-- constants.py        # Magic numbers, RECIST thresholds, config defaults
-|           |-- logging.py          # Structured logging setup
-|           |-- exceptions.py       # Domain-specific exception hierarchy
+|           |-- postgres_client.py    # PostgreSQL connection pool and query helpers
+|           |-- ruvector_client.py    # RuVector client wrapper for vector operations
+|           |-- migrations/           # Database schema migrations
+|           |   |-- 001_initial.sql   # Core tables: patients, measurements, audit
+|           |   |-- 002_ruvector.sql  # RuVector vector collections setup
+|           |-- protocols.py          # StorageBackend protocol, VectorStore protocol
 |
 |-- tests/
 |   |-- conftest.py                 # Shared fixtures: sample DICOM, NIfTI, patients
@@ -123,6 +132,7 @@ Hackaton-MedGemma/
 |   |-- test_reasoning/
 |   |-- test_ui/
 |   |-- test_common/
+|   |-- test_storage/
 |
 |-- notebooks/
 |   |-- evaluation.ipynb            # Reproducible metrics (see ADR-013)
@@ -198,6 +208,19 @@ class Simulation:
     prediction_intervals: list[tuple[float, float]]
     time_horizon_days: list[int]
     model_used: GrowthModel
+
+@dataclass(frozen=True)
+class VectorRecord:
+    entity_id: str
+    entity_type: Literal["lesion", "scan", "slice", "measurement"]
+    embedding: np.ndarray
+    metadata: dict[str, Any]
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    postgres_url: str
+    ruvector_url: str
+    pool_size: int = 5
 ```
 
 ### Protocol-Based Interfaces
@@ -237,6 +260,8 @@ dependencies = [
     "nibabel>=5.2",
     "SimpleITK>=2.3",
     "pyyaml>=6.0",
+    "psycopg[binary]>=3.1",   # PostgreSQL async client
+    "ruvector>=0.1",           # Vector database (in-process or remote)
 ]
 
 [project.optional-dependencies]
@@ -319,6 +344,20 @@ Application configuration is loaded from YAML files via a simple loader in
 Secrets (API keys) are loaded exclusively from environment variables and are never
 written to configuration files.
 
+The `config/default.yaml` includes database configuration:
+
+```yaml
+database:
+  postgres_url: postgresql://dtt:password@localhost:5432/digital_twin_tumor
+  ruvector_url: http://localhost:8080
+  pool_size: 5
+```
+
+In production and Docker deployments, `postgres_url` is overridden by the
+`DATABASE_URL` environment variable, and `ruvector_url` by `RUVECTOR_URL`. The
+password in `default.yaml` is a placeholder for local development only; real
+credentials are always supplied via environment variables.
+
 ## Consequences
 
 ### Positive
@@ -333,6 +372,11 @@ written to configuration files.
   `protocols.py` in each module to understand its contract.
 - **Type safety.** mypy in strict mode catches None-safety issues and interface
   mismatches before runtime.
+- **Database-agnostic codebase.** The `storage/` module provides a clean abstraction
+  over PostgreSQL+RuVector via `StorageBackend` and `VectorStore` protocols, allowing
+  the rest of the codebase to remain database-agnostic. Modules depend on the protocol,
+  not the concrete client, enabling easy testing with in-memory fakes and future
+  migration to alternative backends if needed.
 
 ### Negative
 
@@ -387,3 +431,14 @@ Using non-frozen dataclasses for easier mutation. Rejected because mutable state
 shared across modules is a major source of bugs, especially when lesion measurements
 are passed between tracking, simulation, and reasoning modules. Immutability makes
 the data flow explicit.
+
+### 6. SQLite for Local Storage
+
+Using SQLite as the local persistence layer instead of PostgreSQL+RuVector. Rejected
+because RuVector+PostgreSQL provides vector similarity search, Cypher graph queries,
+GNN-enhanced retrieval, and HNSW indexing that SQLite cannot match. These capabilities
+are essential for similar case retrieval, lesion matching, and the self-improving
+feedback loops described in ADR-015. The `ruvnet/ruvector-postgres` Docker image keeps
+deployment simple (single container) while providing production-grade capabilities.
+For environments where Docker is unavailable (Kaggle), RuVector's in-process Python
+bindings provide the same vector search API backed by a local file store.

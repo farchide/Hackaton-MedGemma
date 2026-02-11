@@ -342,8 +342,10 @@ class LesionGraphBackend(Protocol):
 ### Negative
 
 - NetworkX stores graphs in memory; for patients with hundreds of lesions across dozens
-  of timepoints, memory usage could become significant (mitigated: oncology cases
-  rarely exceed 20 target + non-target lesions across 10 timepoints).
+  of timepoints, memory usage could become significant. Note: RuVector's persistent
+  graph storage eliminates this concern for large-scale deployments, as the graph is
+  stored on disk with indexed access rather than held entirely in memory. NetworkX
+  remains the fallback for notebook environments where the data volume is small.
 - JSON serialization is verbose compared to binary formats; for the expected data sizes
   this is acceptable.
 - The three-stage auto-matching pipeline requires both SimpleITK registration and
@@ -381,6 +383,14 @@ confidence scoring, and no support for human override.
 
 ### 4. Neo4j or Graph Database
 
-A dedicated graph database for lesion tracking. Rejected because: excessive infrastructure
-for the expected data volume (tens of nodes per patient), adds deployment complexity
-incompatible with Kaggle/Colab targets, and NetworkX provides sufficient functionality.
+A dedicated graph database for lesion tracking. Originally rejected because of excessive
+infrastructure for the expected data volume and deployment complexity incompatible with
+Kaggle/Colab targets.
+
+**Partially addressed by RuVector:** RuVector provides equivalent graph query capabilities
+(full Cypher query language) without the infrastructure overhead of a separate Neo4j
+instance, since it is bundled with PostgreSQL in the `ruvector-postgres` Docker image.
+This gives the system Neo4j-class graph queries (Cypher), GNN-enhanced indexing, and
+vector similarity search in a single container, eliminating the primary objection to a
+dedicated graph database. NetworkX remains the in-memory fallback for notebook
+environments where Docker is unavailable.

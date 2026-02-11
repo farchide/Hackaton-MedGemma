@@ -286,6 +286,86 @@ class GrowthModel(Protocol):
 
 ---
 
+### RuVector-Enhanced Growth Intelligence
+
+The growth engine's outputs are persisted and indexed in the RuVector+PostgreSQL
+database tier to enable cross-patient learning and structured querying.
+
+**Structured storage in PostgreSQL.** Fitted model parameters (V0, r, K, s,
+e_j, sigma_obs), AIC/BIC scores, ensemble weights, and simulation results are
+stored in PostgreSQL tables. This enables structured queries such as:
+- "Retrieve all patients whose Gompertz growth rate `r` exceeds 0.05 day^-1"
+- "Find patients where the treatment sensitivity `s` for SRS exceeds the
+  cohort median"
+- "Compare ensemble weights across the PROTEAS cohort"
+
+These queries support the MedGemma reasoning layer (ADR-003) by providing
+population-level context for individual patient narratives.
+
+**Growth trajectory vectors in RuVector.** Each patient's observed growth
+trajectory is encoded as a fixed-length vector (e.g., resampled to N
+uniformly-spaced timepoints, concatenated with fitted parameter values) and
+indexed in RuVector's HNSW store. This enables semantic search for "patients
+with similar growth patterns":
+
+```python
+from ruvector import VectorDB, VectorEntry, SearchQuery
+
+trajectory_db = VectorDB(dimensions=64)  # trajectory embedding dimension
+
+# Encode and store a patient's growth trajectory
+trajectory_vector = encode_trajectory(
+    observed_volumes, fitted_params, timepoints
+)
+trajectory_db.insert(VectorEntry(
+    id=f"{patient_id}_{lesion_id}",
+    vector=trajectory_vector.tolist(),
+    metadata={
+        "patient_id": patient_id,
+        "lesion_id": lesion_id,
+        "model_form": best_model_name,
+        "growth_rate": fitted_params["r"],
+        "response_category": response_category,
+    }
+))
+
+# Find patients with similar growth patterns
+similar_patients = trajectory_db.search(SearchQuery(
+    vector=query_trajectory.tolist(), k=10, include_vectors=False
+))
+```
+
+**GNN-enhanced cross-patient learning.** RuVector's GNN layer
+(MultiHeadAttention, GRUCell, LayerNorm) learns relationships between growth
+trajectories as the corpus grows. Over time, the index refines its notion of
+"similar growth pattern" beyond raw vector distance, incorporating learned
+attention over trajectory features. This can improve counterfactual predictions
+by identifying patients whose treatment response trajectories best match the
+current patient, even when the raw growth parameters differ.
+
+**Temporal hypergraph for treatment-response relationships.** RuVector's
+temporal hypergraph structures encode treatment-response relationships as
+time-aware graph edges. For example:
+
+- `(Patient A) -[:TREATED_WITH {week: 4}]-> (SRS)`
+- `(SRS on Patient A) -[:CAUSED]-> (growth_rate_decrease: 0.03 day^-1)`
+- `(growth_rate_decrease) -[:CLASSIFIED_AS]-> (Partial Response)`
+
+These relationships are queryable via Cypher:
+
+```cypher
+MATCH (p:Patient)-[:TREATED_WITH]->(d:Drug)
+WHERE d.name = 'SRS'
+RETURN p.patient_id, p.growth_rate, p.response_category
+ORDER BY p.growth_rate ASC
+```
+
+This enables graph-based analysis of treatment effectiveness across the cohort,
+providing context for the counterfactual engine: "Among patients treated with
+SRS who had similar baseline growth rates, what was the typical response?"
+
+---
+
 ## Python Libraries
 
 | Library      | Version   | Purpose                                          |
@@ -298,6 +378,8 @@ class GrowthModel(Protocol):
 | `pymc`       | >=5.0     | Hierarchical Bayesian fitting (post-hackathon)   |
 | `numpyro`    | >=0.13    | JAX-based MCMC alternative (post-hackathon)      |
 | `pandas`     | >=2.0     | Therapy log and observation data management      |
+| `psycopg`    | >=3.1     | Store fitted parameters and simulation results in PostgreSQL |
+| `ruvector`   | >=0.1     | Vector indexing for growth trajectory similarity search |
 
 ---
 
@@ -318,6 +400,13 @@ class GrowthModel(Protocol):
   prevent overconfident predictions from any single model.
 - **Counterfactual storytelling.** The ability to overlay "what-if" trajectories
   is the key differentiator for the MedGemma challenge narrative.
+- **Cross-patient learning.** By indexing growth trajectories in RuVector and
+  storing treatment-response relationships in the temporal hypergraph, the
+  system improves its predictions over time. New patients benefit from the
+  accumulated growth pattern corpus, enabling better initial parameter
+  estimates and more informed counterfactual scenarios. RuVector's GNN layers
+  automatically refine the notion of "similar growth pattern" as more cases
+  are processed.
 
 ### Negative
 
@@ -373,6 +462,38 @@ which provides regularization for patients with few observations. Rejected for
 the hackathon phase due to implementation complexity (would require `nlmixr2`
 via R bridge or a custom PyMC hierarchical model). Planned for post-hackathon
 as an extension of the Bayesian approach.
+
+### 6. RuVector for Cross-Patient Growth Pattern Learning
+
+Use RuVector's HNSW index and temporal hypergraph to store growth trajectories
+as vectors and treatment-response relationships as graph edges, enabling
+semantic search for similar growth patterns and graph-based treatment
+effectiveness analysis.
+
+- **Accepted** because:
+  - **Similar-patient retrieval**: Encoding growth trajectories as vectors and
+    indexing them in RuVector's HNSW store enables instant retrieval of patients
+    with similar growth dynamics. This provides population-level context for
+    individual patient predictions and informs counterfactual scenarios with
+    empirical data from similar cases.
+  - **Treatment-response graph**: The temporal hypergraph encodes causal
+    relationships between treatments and growth rate changes, queryable via
+    Cypher. This enables structured queries like "What was the typical growth
+    rate response to SRS among patients with similar baseline tumors?"
+  - **Self-improving retrieval**: RuVector's GNN layers refine the similarity
+    metric as more cases are processed. Early in the cohort, retrieval relies
+    on raw vector distance; as the GNN learns from the accumulating data, it
+    discovers latent structure in growth patterns that improves match quality.
+  - **Durable storage**: PostgreSQL provides durable, queryable storage for
+    fitted parameters and simulation results, supporting multi-session
+    workflows and reproducible analysis.
+  - **Zero GPU cost**: RuVector runs on CPU, so trajectory indexing and
+    similarity search do not compete with scipy optimization or downstream
+    MedGemma inference for computational resources.
+  - **Alternatives rejected**: FAISS provides HNSW but lacks graph queries and
+    GNN self-improvement. A standalone Neo4j instance would add deployment
+    complexity. Storing trajectories as JSON blobs in PostgreSQL would lack
+    semantic search capability.
 
 ---
 
