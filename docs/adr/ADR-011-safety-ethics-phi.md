@@ -183,6 +183,50 @@ data/audit/{session_id}_audit.jsonl
 Audit logs never contain PHI. Patient identifiers in log entries use the
 de-identified hash ID only.
 
+### 4a. PostgreSQL-Backed Audit Storage
+
+In addition to the JSONL file-based audit log (which serves as a local fallback),
+audit entries are persisted to a PostgreSQL table for transactional integrity,
+queryability, and durability. The `ruvnet/ruvector-postgres` Docker image provides
+both PostgreSQL and RuVector in a single container.
+
+**Schema:**
+
+```sql
+CREATE TABLE audit_log (
+    id SERIAL PRIMARY KEY,
+    event_id UUID NOT NULL DEFAULT gen_random_uuid(),
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    session_id VARCHAR(64) NOT NULL,
+    action VARCHAR(128) NOT NULL,
+    component VARCHAR(64),
+    user_id VARCHAR(64),
+    data_hash VARCHAR(64),
+    parameters JSONB,
+    INDEX idx_audit_session (session_id),
+    INDEX idx_audit_action (action),
+    INDEX idx_audit_timestamp (timestamp)
+);
+```
+
+**Benefits:**
+
+- **SQL queries for audit analysis.** Compliance officers or developers can run
+  queries such as "show all measurement edits for patient X across all sessions"
+  or "count all RECIST override events in the last 30 days" without parsing
+  log files.
+- **JSONB parameters field.** The `parameters` column stores action-specific data
+  (e.g., old/new measurement values, lesion coordinates) as flexible JSON, enabling
+  ad hoc queries without schema changes.
+- **Indexed queries for compliance reporting.** The indexes on `session_id`,
+  `action`, and `timestamp` support fast filtered queries for regulatory audits
+  and usage analytics.
+- **Transactional guarantees.** PostgreSQL ACID transactions ensure that audit
+  entries are either fully written or not at all, preventing partial or corrupted
+  log entries that can occur with file-based JSONL under crash conditions.
+- **Tamper detection.** RuVector's security verification features provide additional
+  tamper detection on audit records (see Section 5a).
+
 ### 5. Data Provenance Tracking
 
 Every loaded dataset carries a provenance record:
@@ -203,6 +247,31 @@ class DataProvenance:
 The provenance record is displayed in the UI data panel and included in all exported
 reports. The system refuses to process datasets without a provenance record when
 `DEMO_MODE=true`.
+
+### 5a. RuVector Security Features
+
+RuVector (provided by the `ruvnet/ruvector-postgres` Docker image) includes built-in
+security verification capabilities that strengthen the safety and integrity posture
+of the Digital Twin Tumor system:
+
+- **Tamper detection on stored vectors and metadata.** RuVector can detect unauthorized
+  modifications to stored vectors and their associated metadata. This is particularly
+  valuable for audit records and measurement embeddings, where post-hoc tampering
+  would undermine the integrity of the audit trail.
+- **Vector-based semantic PHI detection.** PHI scanning can be enhanced beyond simple
+  keyword matching by embedding known PHI patterns (names, dates, medical record
+  number formats) as vectors in RuVector. Incoming text and metadata fields are
+  embedded and compared against these patterns using semantic similarity search,
+  catching PHI that keyword rules might miss (e.g., misspelled names, reformatted
+  dates, abbreviated identifiers).
+- **Cryptographic hash logging.** All vector operations (inserts, updates, deletions)
+  are logged with cryptographic hashes, creating a tamper-evident chain. If any record
+  is modified outside the normal application flow, the hash chain will break,
+  triggering an integrity alert.
+
+These features complement the existing DICOM de-identification gate (Section 2) by
+adding a secondary detection layer that operates on semantic content rather than
+structured DICOM tags alone.
 
 ### 6. iRECIST Disclaimer
 
@@ -244,6 +313,9 @@ The project writeup includes explicit references to:
   landscape and strengthen the hackathon submission.
 - Demo mode with synthetic-only data eliminates PHI risk entirely for the hackathon
   evaluation.
+- PostgreSQL provides queryable, durable audit storage with transactional guarantees,
+  enabling SQL-based compliance reporting and eliminating the risk of corrupted or
+  partial log entries that can occur with file-based JSONL storage.
 
 ### Negative
 

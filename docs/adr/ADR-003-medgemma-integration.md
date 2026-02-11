@@ -387,6 +387,46 @@ This serves two purposes:
 2. **Judging**: Demonstrates effective use of multiple HAI-DEF models (MedGemma
    + MedSigLIP), scoring higher on the "HAI-DEF use" criterion.
 
+#### RuVector-Powered Evidence Retrieval
+
+Rather than computing cosine similarity at query time across all slices,
+MedSigLIP embeddings are pre-indexed in RuVector's HNSW index at ingestion
+time. This moves the O(n) similarity scan to a sub-millisecond approximate
+nearest neighbor lookup, enabling instant evidence retrieval even as the
+embedding corpus grows across patients and timepoints.
+
+```python
+# Store MedSigLIP embeddings in RuVector
+from ruvector import VectorDB, VectorEntry, SearchQuery
+
+evidence_db = VectorDB(dimensions=768)  # MedSigLIP embedding dimension
+
+# Index all slice embeddings at ingestion time
+for slice_idx, embedding in enumerate(slice_embeddings):
+    evidence_db.insert(VectorEntry(
+        id=f"{patient_id}_{timepoint}_{slice_idx}",
+        vector=embedding.tolist(),
+        metadata={"patient_id": patient_id, "timepoint": timepoint, "slice_idx": slice_idx}
+    ))
+
+# At query time, retrieve top-k evidence slices in <1ms
+results = evidence_db.search(SearchQuery(
+    vector=query_embedding.tolist(), k=4, include_vectors=False
+))
+```
+
+This approach has three advantages over the in-memory cosine similarity
+baseline:
+
+1. **Speed**: HNSW provides sub-millisecond retrieval regardless of corpus
+   size, compared to linear-time cosine similarity over all slices.
+2. **Persistence**: Embeddings survive process restarts. A clinician can close
+   the application and return the next day without re-encoding all slices.
+3. **Cross-patient retrieval**: The HNSW index spans all patients, enabling
+   the evidence panel to surface visually similar slices from other patients
+   in the same cohort -- a feature that would require a full re-scan with the
+   in-memory approach.
+
 ### Fallback Strategy: MedGemma 27B Text-Only
 
 If GPU resources allow (48+ GB VRAM or multi-GPU), we optionally use the 27B
@@ -448,7 +488,13 @@ plus KV cache overhead during generation. Our memory budget:
 | MedSAM               | ~2.5 GB        | Layer 3 (Measurement)    |
 | MedSigLIP            | ~1.5 GB        | Layer 6 (Evidence)       |
 | KV Cache + overhead   | ~2-4 GB        | During generation        |
+| RuVector (CPU)        | ~0 GB GPU / ~500MB RAM | All phases (background) |
 | Total peak            | ~14-16 GB      |                          |
+
+Note: RuVector runs entirely on CPU and does not consume GPU VRAM. Its ~500 MB
+RAM footprint covers the HNSW index, GNN layers, and connection overhead. This
+means adding RuVector-powered evidence retrieval has zero impact on the GPU
+memory budget for MedGemma, MedSAM, and MedSigLIP.
 
 Strategy for a 16 GB GPU (T4 on HuggingFace Spaces):
 1. Load MedSAM during annotation phase; unload before reasoning
@@ -567,6 +613,11 @@ class ReasoningEngine:
 - **Grounded narratives**: Every statement in the narrative traces back to a
   measurement value or model output. The `validate_grounding()` function
   provides a quantitative check.
+- **Self-improving evidence retrieval**: RuVector's GNN layers (40+ attention
+  mechanisms including MultiHeadAttention and GRUCell) refine the HNSW index
+  over time. As more cases are processed and evidence slices are selected or
+  rejected by clinicians, the retrieval quality improves automatically. This
+  means the evidence panel becomes more clinically relevant with continued use.
 
 ### Negative
 

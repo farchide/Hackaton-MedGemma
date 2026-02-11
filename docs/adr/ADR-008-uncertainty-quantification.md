@@ -252,6 +252,50 @@ def reliability_score(n_timepoints: int, total_sigma_mm: float,
         return "LOW"
 ```
 
+### RuVector-Enhanced Uncertainty Calibration
+
+Measurement uncertainty estimates are strengthened by leveraging population-level data
+from similar lesions, retrieved via RuVector's vector similarity search. This approach
+uses the principle that lesions with similar morphology (as captured by their MedSigLIP
+embeddings) tend to exhibit similar measurement uncertainty profiles.
+
+**Process:**
+
+1. When a new lesion is measured, RuVector searches for the k=20 most similar historical
+   lesions by embedding cosine similarity.
+2. For each retrieved similar lesion, the system loads its historical measurement
+   uncertainty profile: `sigma_manual`, `sigma_auto`, `sigma_scan`, and the composed
+   `total_sigma`.
+3. The population-level uncertainty distribution from these similar cases serves as an
+   **informative prior** for the new case's `sigma_obs` parameter in the state-space
+   growth model (ADR-005).
+4. Specifically, the prior for `sigma_obs` is set as the median of the similar cases'
+   `total_sigma` values, weighted by embedding similarity:
+   ```python
+   similar_cases = ruvector_client.search(
+       query_vector=current_lesion_embedding,
+       k=20,
+       filter={"modality": current_modality},
+   )
+   weights = np.array([case.similarity for case in similar_cases])
+   sigmas = np.array([case.metadata["total_sigma_mm"] for case in similar_cases])
+   sigma_prior = np.average(sigmas, weights=weights)
+   ```
+5. For cases with limited data (fewer than 3 timepoints), this similarity-informed
+   prior substantially reduces uncertainty compared to using a generic population mean.
+
+**GNN-Enhanced Calibration:**
+
+RuVector's GNN layer learns which embedding features best predict measurement
+uncertainty over time. As more lesions are measured and their uncertainty profiles
+recorded, the GNN refines its internal representation to improve calibration accuracy.
+This creates a virtuous cycle: each new measurement improves the system's ability to
+estimate uncertainty for future similar lesions.
+
+**Fallback:** When RuVector is unavailable (e.g., Kaggle notebook environment), the
+system falls back to the static calibration protocol described above using RIDER-derived
+estimates.
+
 ### Visualization Strategy
 
 1. **Trajectory plots**: Central prediction line with shaded bands.
@@ -279,6 +323,7 @@ def reliability_score(n_timepoints: int, total_sigma_mm: float,
 | `torch` | MC Dropout inference on segmentation models |
 | `matplotlib` | Static uncertainty band plots, calibration curves |
 | `plotly` | Interactive trajectory plots with hover-over uncertainty details |
+| `ruvector` | Similarity-based calibration data retrieval from historical lesions |
 
 ## Consequences
 
@@ -296,6 +341,9 @@ def reliability_score(n_timepoints: int, total_sigma_mm: float,
   ensemble members; Tier 3 with more scenario parameters.
 - **Honest communication**: The reliability score prevents overconfident presentation of
   projections based on insufficient data.
+- **Population-level uncertainty intelligence**: RuVector-based similarity search enables
+  uncertainty priors informed by similar historical cases, reducing calibration uncertainty
+  for new patients and improving the reliability of predictions for cases with limited data.
 
 ### Negative
 

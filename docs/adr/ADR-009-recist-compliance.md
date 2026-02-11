@@ -318,6 +318,77 @@ class ResponseAssessment:
     assessment_version: int                # Incremented on each modification
 ```
 
+### PostgreSQL-Backed RECIST Storage
+
+All RECIST measurements and response assessments are stored in PostgreSQL tables within
+the `ruvector-postgres` container, providing full relational integrity, transactional
+consistency, and SQL query capabilities for longitudinal analysis.
+
+```sql
+CREATE TABLE recist_measurements (
+    id SERIAL PRIMARY KEY,
+    patient_id VARCHAR(64) NOT NULL,
+    lesion_id VARCHAR(64) NOT NULL,
+    timepoint_id VARCHAR(64) NOT NULL,
+    lesion_type VARCHAR(32),
+    is_target BOOLEAN,
+    longest_diameter_mm FLOAT,
+    short_axis_mm FLOAT,
+    volume_mm3 FLOAT,
+    measurement_method VARCHAR(32),
+    confidence FLOAT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE response_assessments (
+    id SERIAL PRIMARY KEY,
+    patient_id VARCHAR(64) NOT NULL,
+    timepoint_id VARCHAR(64) NOT NULL,
+    sum_of_diameters_mm FLOAT,
+    baseline_sum_mm FLOAT,
+    nadir_sum_mm FLOAT,
+    target_response VARCHAR(8),
+    overall_response VARCHAR(8),
+    auto_classified BOOLEAN DEFAULT TRUE,
+    override_reason TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+**Relational benefits:**
+
+- **Longitudinal queries**: SQL queries enable efficient cross-timepoint analysis without
+  loading entire patient histories into memory:
+  ```sql
+  SELECT patient_id, timepoint_id, sum_of_diameters_mm, target_response
+  FROM response_assessments
+  WHERE patient_id = 'PROTEAS-012'
+  ORDER BY timepoint_id;
+  ```
+
+- **Cohort-level analysis**: aggregate queries across all patients for population
+  statistics:
+  ```sql
+  SELECT target_response, COUNT(*) as count
+  FROM response_assessments
+  WHERE auto_classified = TRUE
+  GROUP BY target_response;
+  ```
+
+- **Cross-patient RECIST pattern analysis** via RuVector's Cypher query engine:
+  ```
+  MATCH (p:Patient)-[:ASSESSED_AS]->(r:Response {category: 'PR'})
+  RETURN p, count(r) as pr_count
+  ```
+
+- **JOIN with dataset registry** (ADR-006) and lesion tracking (ADR-010) tables for
+  integrated queries spanning the entire data model.
+
+The Python `dataclass`-based in-memory representation described above remains the
+working format during pipeline execution. A persistence layer synchronizes dataclass
+instances to/from PostgreSQL rows, with JSON serialization retained as a portable
+fallback for notebook environments.
+
 ### UI Design for Response Classification
 
 1. **Color-coded response badges**:
@@ -358,6 +429,9 @@ class ResponseAssessment:
   modern response assessment challenges, adding depth to the submission.
 - **Evaluation clarity**: RECIST classifications provide a discrete, well-defined output
   that can be objectively evaluated against ground truth.
+- **Relational storage**: PostgreSQL-backed RECIST storage enables longitudinal queries
+  across the entire patient cohort, supporting cohort-level response analysis, nadir
+  tracking, and cross-patient comparison without loading full datasets into memory.
 
 ### Negative
 
@@ -421,3 +495,15 @@ most clinically relevant challenges in oncology today, and demonstrating awarene
 pseudoprogression and confirmation logic significantly strengthens the submission. The
 iRECIST extension is implemented as an optional module that activates only when the therapy
 log indicates immunotherapy, keeping the default path simple.
+
+### 6. PostgreSQL for RECIST Data Storage
+
+**Accepted.** Storing RECIST measurements and response assessments in PostgreSQL tables
+within the `ruvector-postgres` Docker container was accepted because: (a) relational
+storage provides transactional integrity for concurrent measurement updates, (b) SQL
+queries enable efficient longitudinal and cohort-level analysis without custom Python
+code, (c) foreign key relationships between `recist_measurements`, `response_assessments`,
+and the `dataset_registry` (ADR-006) enforce referential integrity across the data model,
+and (d) the combined `ruvector-postgres` image eliminates the need for a separate
+database deployment. The Python dataclass representation is retained as the in-memory
+working format, with a thin persistence layer for PostgreSQL synchronization.
