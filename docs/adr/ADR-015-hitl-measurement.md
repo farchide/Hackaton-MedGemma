@@ -176,6 +176,30 @@ class AuditEvent:
 Audit events are stored in an append-only list in session state and can be exported
 as JSON for review. They are never deleted during a session.
 
+### Persistent Audit Storage via PostgreSQL
+
+In addition to the in-memory session state, audit events are persisted to PostgreSQL
+in real-time via the `storage/postgres_client.py` module (see ADR-014). This provides
+several critical benefits:
+
+- **Durability.** The audit trail survives browser refresh, session timeout, Gradio
+  reconnection, or application crash. No measurement history is lost due to transient
+  failures.
+- **Cross-session analysis.** SQL queries enable audit analysis that spans multiple
+  sessions: "show all measurement edits for lesion L001 across all sessions", "find
+  all cases where a user overrode a RECIST classification", or "list all identity
+  reassignments in the last 7 days".
+- **Provenance chain references.** Audit events stored in PostgreSQL reference the full
+  provenance chain -- each event links to the patient, timepoint, lesion, and mask
+  version it pertains to, enabling complete reconstruction of the measurement history
+  for any entity.
+- **Compliance reporting.** Indexed queries on the `audit_log` table (see ADR-011,
+  Section 4a) support fast filtered reporting for regulatory review without parsing
+  log files or loading session state.
+
+The in-memory session list remains the primary source for the live UI audit panel;
+PostgreSQL serves as the durable backing store.
+
 ### Edit History and Versioning
 
 Every segmentation mask edit creates a new version. The system maintains a version
@@ -195,6 +219,53 @@ class MaskVersion:
 The user can revert to any previous version via a version history dropdown. Reverting
 does not delete later versions; it creates a new version that duplicates the selected
 historical state (branch-style history, not destructive undo).
+
+### RuVector-Powered Feedback Loops
+
+When a user confirms or corrects a measurement in Step 3, the correction is stored
+as a training signal in RuVector. This creates a self-improving measurement system
+that learns from human expertise over time:
+
+1. **Embedding storage.** Each (lesion_image_patch, confirmed_measurement) pair is
+   embedded using MedSigLIP and stored in RuVector with associated metadata (organ,
+   diameter, measurement method, user confidence).
+2. **Case library accumulation.** Over time, this builds a "case library" of
+   human-confirmed measurements indexed by visual similarity. The library grows with
+   every session.
+3. **Context retrieval for new measurements.** For new measurements, RuVector retrieves
+   the k most similar historical cases to provide population-level context:
+   - "This lesion is similar to 5 previously confirmed measurements averaging 12.3mm"
+   - "Similar lesions in this organ showed a measurement range of 10-15mm"
+   - This helps the user validate their measurement against historical data without
+     leaving the measurement workflow.
+4. **GNN-enhanced refinement.** RuVector's GNN layer refines retrieval quality based
+   on user feedback patterns. If users consistently override auto-suggestions for a
+   particular lesion type, the GNN learns to weight those cases differently in future
+   similarity searches.
+
+### Similar Case Retrieval for Clinical Context
+
+During Step 3 (Measure Diameter), the system uses RuVector to search for historically
+similar lesions and present them as contextual information to the clinician:
+
+- **Similarity panel.** A side panel displays thumbnails of similar lesions from the
+  case library, their confirmed measurements, and (if available) their treatment
+  response outcomes.
+- **Population context.** The panel shows summary statistics: mean measurement, standard
+  deviation, and measurement range for the top-k similar cases.
+- **Response trajectory queries.** Cypher graph queries retrieve cases with similar
+  response trajectories, helping the clinician understand the typical progression
+  pattern for lesions that look like the current one:
+
+```
+MATCH (l:Lesion)-[:MEASURED_AT]->(t:Timepoint)-[:RESPONDED_AS]->(r:Response)
+WHERE l.embedding_similarity > 0.8
+RETURN l, collect(t), r
+```
+
+- **Non-blocking workflow.** The similarity panel is informational only; it does not
+  block or delay the measurement workflow. It loads asynchronously and appears once
+  results are available.
 
 ### RECIST Auto-Classification
 
@@ -247,6 +318,8 @@ which measurements were human-verified.
 | matplotlib >= 3.8 | Measurement line rendering, identity graph plots |
 | uuid (stdlib) | Audit event and lesion ID generation |
 | datetime (stdlib) | Timestamp management |
+| psycopg >= 3.1 | Persistent audit storage, measurement history |
+| ruvector >= 0.1 | Feedback embedding loops, similar case retrieval |
 
 ## Consequences
 
@@ -262,6 +335,15 @@ which measurements were human-verified.
   overridable (advisory, not blocking), respecting clinical autonomy.
 - **Evaluation support.** The audit log directly feeds Layer 1 and Layer 2 evaluation
   metrics (ADR-013), since we know the provenance of every measurement.
+- **Persistent audit storage.** PostgreSQL-backed audit events survive session
+  boundaries (browser refresh, timeout, crash), ensuring no measurement history is
+  ever lost and enabling cross-session compliance reporting.
+- **Similar case retrieval.** RuVector-powered similarity search provides clinicians
+  with population-level context during measurement, enhancing clinical decision
+  confidence without disrupting the workflow.
+- **Self-improving measurement suggestions.** RuVector's GNN feedback loops learn from
+  user confirmations and corrections over time, progressively improving the quality of
+  auto-suggested measurements and similar case retrieval.
 
 ### Negative
 
