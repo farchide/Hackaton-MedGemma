@@ -221,6 +221,60 @@ Persisted to disk as:
 - `.json` sidecar for metadata
 - `.png` files for MedGemma-ready slices
 
+### 9. Image Embedding Storage in RuVector
+
+After preprocessing, a compact embedding vector is generated for each processed volume
+using MedSigLIP. These embeddings are batch-inserted into RuVector's HNSW index,
+enabling three key capabilities:
+
+1. **Rapid similar-case retrieval for MedGemma context**: When composing a prompt for
+   MedGemma's visual reasoning, the system retrieves the k most similar prior scans
+   (from the same patient or across the population) to provide comparative context.
+   This is critical for longitudinal change detection and differential assessment.
+
+2. **Anomaly detection for preprocessing quality control**: Embeddings of newly
+   preprocessed volumes are compared against the population distribution. Volumes whose
+   embeddings fall far from the population manifold (low cosine similarity to all
+   neighbors) are flagged for manual review, catching preprocessing failures such as
+   incorrect orientation, failed bias correction, or corrupt input data.
+
+3. **Longitudinal drift detection across timepoints**: For a single patient, the
+   sequence of per-timepoint embeddings forms a trajectory in embedding space. Sudden
+   large jumps in this trajectory that do not correlate with expected treatment effects
+   may indicate scan quality issues or protocol changes that affect downstream
+   measurements.
+
+```python
+# After preprocessing, store embedding in RuVector
+embedding = medsiglib_encoder(processed_volume.selected_slices)
+ruvector_client.insert(VectorEntry(
+    id=f"{metadata.patient_id}_{metadata.study_date}",
+    vector=embedding,
+    metadata={
+        "patient_id": metadata.patient_id,
+        "modality": metadata.modality,
+        "sequence_type": metadata.sequence_type,
+    }
+))
+```
+
+For batch processing of entire datasets, RuVector's batch insert capability
+(10K+ vectors per operation) ensures that initial dataset ingestion completes
+efficiently:
+
+```python
+# Batch insert all embeddings after dataset preprocessing
+entries = [
+    VectorEntry(
+        id=f"{vol.metadata.patient_id}_{vol.metadata.study_date}",
+        vector=medsiglib_encoder(vol.selected_slices),
+        metadata={"patient_id": vol.metadata.patient_id, "modality": vol.metadata.modality},
+    )
+    for vol in all_processed_volumes
+]
+ruvector_client.batch_insert(entries)
+```
+
 ### Python Library Stack
 
 | Library | Version | Purpose |
@@ -232,6 +286,7 @@ Persisted to disk as:
 | `torchio` | >= 0.19 | Data augmentation, transforms (for synthetic data) |
 | `numpy` | >= 1.24 | Array operations |
 | `Pillow` | >= 10.0 | PNG export for MedGemma slices |
+| `ruvector` | >= 0.1 | Vector embedding storage and similarity search |
 
 ## Consequences
 
@@ -247,6 +302,9 @@ Persisted to disk as:
   2D inputs that match MedGemma's expected input format.
 - **Measurement validity**: isotropic resampling and consistent orientation ensure that
   diameter and volume measurements are geometrically correct.
+- **Similar-case retrieval**: embedding each processed volume in RuVector enables rapid
+  retrieval of morphologically similar cases, enriching MedGemma's reasoning context
+  with relevant comparators and supporting population-level analysis.
 
 ### Negative
 

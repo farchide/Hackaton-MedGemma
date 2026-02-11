@@ -54,6 +54,37 @@ src/
   reasoning/       Layer 6 - MedGemma Reasoning Layer
 ```
 
+### Persistence & Vector Intelligence Layer
+
+Beneath all six application layers sits a shared **persistence and vector
+intelligence substrate** provided by the `ruvnet/ruvector-postgres` Docker
+image. This single container bundles PostgreSQL (relational storage) with
+RuVector (vector database with HNSW indexing, Cypher graph queries, and
+GNN-enhanced retrieval) into one deployment unit.
+
+**Responsibilities:**
+
+- **Relational storage (PostgreSQL):** Patient metadata, therapy logs, RECIST
+  measurement tables, fitted model parameters, simulation results, and audit
+  logs. Dataclasses from `src/common/models.py` are serialized to PostgreSQL
+  tables via `psycopg`.
+- **Vector storage (RuVector HNSW):** MedSigLIP image embeddings, segmentation
+  mask shape descriptors, and patient growth trajectory vectors. Sub-millisecond
+  approximate nearest neighbor search enables evidence retrieval, similar-lesion
+  lookup, and cross-patient pattern matching.
+- **Graph queries (RuVector Cypher):** Lesion identity relationships, treatment-
+  response graphs, and temporal hypergraph structures are queryable via Cypher.
+  This complements NetworkX for in-memory graph analysis with persistent,
+  queryable graph storage.
+- **Self-improving index (RuVector GNN):** The GNN attention layers
+  (MultiHeadAttention, GRUCell, LayerNorm) refine vector retrieval quality as
+  more cases are ingested. The index gets smarter with use, improving evidence
+  retrieval and similar-patient matching over time.
+
+Every application layer can read from and write to this substrate. Layers 1-2
+primarily write metadata; Layers 3-6 both read and write embeddings, graph
+relationships, and structured results.
+
 ### ASCII Architecture Diagram
 
 ```
@@ -86,11 +117,26 @@ src/
                                                     | + Uncertainty Report|
                                                     | + Safety Disclaimers|
                                                     +---------------------+
+     ___________________________________________________________________
+    |                                                                   |
+    |              PERSISTENCE & VECTOR INTELLIGENCE LAYER              |
+    |  +---------------------------+  +-------------------------------+ |
+    |  |       PostgreSQL          |  |          RuVector             | |
+    |  | - Patient metadata        |  | - HNSW vector index          | |
+    |  | - RECIST measurements     |  | - Cypher graph queries       | |
+    |  | - Fitted parameters       |  | - GNN self-improving layers  | |
+    |  | - Audit logs              |  | - MedSigLIP embeddings       | |
+    |  | - Simulation results      |  | - Growth trajectory vectors  | |
+    |  +---------------------------+  +-------------------------------+ |
+    |              ruvnet/ruvector-postgres (Docker)                     |
+    |___________________________________________________________________|
 
 Data Flow (typed dataclasses at each boundary):
 
   ImagingStudy --> PreprocessedVolume --> LesionMeasurement -->
   TrackedLesionSet --> TwinSimulationResult --> ClinicalNarrative
+
+  All dataclasses are persisted to PostgreSQL; embeddings indexed in RuVector.
 ```
 
 ### Layer Responsibilities
@@ -153,6 +199,15 @@ defined in `src/common/models.py` so that every layer imports from a single
 source of truth. We use `typing.Protocol` for interface definitions so layers
 depend on abstractions, not implementations.
 
+Dataclasses are serialized to PostgreSQL tables via `psycopg` for durable
+storage and cross-session retrieval. Fields containing high-dimensional data
+(e.g., MedSigLIP embeddings, growth trajectory vectors, segmentation shape
+descriptors) are additionally indexed in RuVector's HNSW store for semantic
+similarity search. This dual-write pattern ensures that structured queries
+(e.g., "all measurements for patient X") go through PostgreSQL, while semantic
+queries (e.g., "find patients with similar growth trajectories") go through
+RuVector.
+
 ```python
 # Example boundary contracts (simplified)
 @dataclass
@@ -194,11 +249,16 @@ class TwinSimulationResult:
 
 This is a 13-day hackathon. A monolith with clean internal boundaries gives us:
 
-1. **Speed**: No service discovery, no network serialization, no Docker orchestration
+1. **Speed**: No service discovery, no network serialization, minimal Docker orchestration
 2. **Debuggability**: Single process, single stack trace, print-statement debugging
-3. **Demo simplicity**: `python app.py` launches everything; judges can reproduce
+3. **Demo simplicity**: `docker compose up -d ruvector-postgres && python app.py`
+   launches everything; judges can reproduce with two commands
 4. **Refactorability**: Clean module boundaries mean we can extract services later
    if this becomes a research artifact post-hackathon
+5. **Single-container database**: The `ruvnet/ruvector-postgres` Docker image
+   provides PostgreSQL + RuVector (vector DB with HNSW, Cypher, GNN) in one
+   container, maintaining deployment simplicity while adding durable persistence
+   and vector intelligence. No separate database servers to configure.
 
 The module boundaries are strict enough that no layer imports implementation
 details from another layer -- only shared dataclasses from `src/common/`.
@@ -213,6 +273,8 @@ details from another layer -- only shared dataclasses from `src/common/`.
 | Tracking               | Problem domain (15%), Execution (30%)          | Longitudinal reasoning is the core clinical problem              |
 | Twin Engine            | Impact potential (15%), Effective HAI-DEF (20%) | Counterfactuals are the "wow" feature; uncertainty is rigorous   |
 | MedGemma Reasoning     | Effective HAI-DEF (20%), Execution (30%)       | Central, non-optional use of MedGemma; narrative quality         |
+| Persistence (RuVector  | Product feasibility (20%), Impact (15%)        | Durable storage shows production readiness; vector search and    |
+| + PostgreSQL)          |                                                | GNN learning enable cross-patient insights that grow over time   |
 
 ### Event-Driven Internal Communication
 
@@ -320,6 +382,35 @@ Single `app.py` with all logic in one file.
   The judging criteria explicitly reward code quality under "Execution and
   communication" (30%), so clean organization directly impacts scoring.
 
+### 5. RuVector+PostgreSQL as Persistence Layer
+
+Use the `ruvnet/ruvector-postgres` Docker image to provide a combined
+relational + vector database tier beneath all application layers.
+
+- **Accepted** because:
+  - **Single container**: The combined Docker image provides PostgreSQL (for
+    structured queries, audit logs, measurement tables) and RuVector (for HNSW
+    vector search, Cypher graph queries, GNN-enhanced retrieval) with no
+    additional infrastructure.
+  - **Durable persistence**: Unlike in-memory-only approaches, patient data,
+    fitted parameters, and embeddings survive process restarts, enabling
+    multi-session workflows and reproducible demos.
+  - **Vector intelligence**: RuVector's HNSW index enables sub-millisecond
+    semantic search over MedSigLIP embeddings, growth trajectory vectors, and
+    segmentation descriptors -- capabilities that would require significant
+    custom code with a plain relational database.
+  - **Graph queries**: Cypher support enables rich queries over lesion identity
+    graphs and treatment-response relationships without a separate graph
+    database (e.g., Neo4j).
+  - **Self-improving**: RuVector's GNN layers (40+ attention mechanisms)
+    improve retrieval quality as more cases are processed, a unique advantage
+    for a learning medical system.
+  - **Alternatives rejected**: SQLite lacks vector search and graph queries.
+    Flat file storage (JSON/pickle) lacks querying, concurrency, and
+    durability. Standalone PostgreSQL with pgvector provides vector search but
+    not graph queries or GNN-enhanced retrieval. A separate Neo4j instance
+    would add deployment complexity contrary to our monolith-first strategy.
+
 ---
 
 ## References
@@ -330,3 +421,5 @@ Single `app.py` with all logic in one file.
 - TumorTwin framework: Bidirectional update principle for digital twins
 - PROTEAS Dataset (Scientific Data, Nature): Longitudinal brain metastases MRI
 - Competition evaluation criteria: Kaggle MedGemma Impact Challenge overview page
+- RuVector: Distributed vector database with GNN self-improving layers, Cypher graph queries, and HNSW indexing (https://github.com/ruvnet/ruvector)
+- ruvnet/ruvector-postgres Docker image: Combined PostgreSQL + RuVector in a single container (Docker Hub)

@@ -89,6 +89,10 @@ dependencies = [
     "matplotlib>=3.8",
     "plotly>=5.18",
 
+    # Database & Vector Intelligence
+    "psycopg[binary]>=3.1",   # PostgreSQL async client
+    "ruvector>=0.1",           # Vector DB client (RuVector Python bindings)
+
     # Utilities
     "pillow>=10.0",
     "pydantic>=2.5",
@@ -127,6 +131,8 @@ segmentation = [
 | **Interactive Plots**| `plotly`          | >=5.18   | Interactive tumor burden curves in Gradio      |
 | **Validation**      | `pydantic`        | >=2.5    | Input validation at system boundaries          |
 | **Images**          | `pillow`          | >=10.0   | Image format conversion, thumbnail generation  |
+| **PostgreSQL**      | `psycopg`         | >=3.1    | PostgreSQL client for structured medical data, audit logs, RECIST measurements |
+| **Vector DB**       | `ruvector`        | >=0.1    | Vector database client for embedding storage, semantic search, GNN-enhanced retrieval |
 
 ### Why Gradio Over Alternatives
 
@@ -280,6 +286,9 @@ if __name__ == "__main__":
 ### Development Workflow
 
 ```bash
+# Start the database tier (PostgreSQL + RuVector in one container)
+docker compose up -d ruvector-postgres
+
 # Environment setup
 uv venv --python 3.11
 uv pip install -e ".[dev]"
@@ -315,6 +324,11 @@ uv run mypy src/
   cleaner error messages during development.
 - **Dependency management**: `uv` is 10-100x faster than pip for resolution
   and installation, reducing CI time and developer friction.
+- **Vector search without extra infrastructure**: RuVector provides HNSW vector
+  search, Cypher graph queries, and GNN-enhanced retrieval through a single
+  Python client (`ruvector`) backed by the `ruvnet/ruvector-postgres` Docker
+  image. No separate vector database, graph database, or embedding service is
+  needed.
 
 ### Negative
 

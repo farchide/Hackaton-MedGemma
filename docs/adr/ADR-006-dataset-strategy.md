@@ -270,6 +270,64 @@ SYN-001    | SYNTHETIC| 2024-01-01 | MRI_T1   | data/synthetic/...| data/synthet
 This registry is the single source of truth for what data is available and
 is queried by all downstream components.
 
+### PostgreSQL-Backed Dataset Registry
+
+For production and multi-user deployments, the CSV-based registry is replaced by a
+PostgreSQL table hosted in the `ruvector-postgres` Docker container. This provides:
+
+1. **SQL queries for complex data selection**: filter by modality, date range, provenance,
+   or any combination without loading the entire registry into memory.
+2. **Transactional integrity for concurrent access**: multiple pipeline stages and users
+   can read/write the registry simultaneously without corruption.
+3. **JOIN capabilities**: the registry table can be joined with measurement tables
+   (ADR-009), tracking tables (ADR-010), and uncertainty calibration data (ADR-008)
+   for cross-cutting queries.
+
+```sql
+CREATE TABLE dataset_registry (
+    id SERIAL PRIMARY KEY,
+    patient_id VARCHAR(64) NOT NULL,
+    dataset_name VARCHAR(64) NOT NULL,
+    timepoint DATE NOT NULL,
+    modality VARCHAR(32),
+    image_path TEXT NOT NULL,
+    mask_path TEXT,
+    provenance VARCHAR(32) DEFAULT 'real',
+    license VARCHAR(64),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+The CSV-based registry remains as a portable fallback for Kaggle notebook environments
+where a PostgreSQL instance is not available. A `registry_sync` utility function
+exports the PostgreSQL table to CSV and imports CSV rows into PostgreSQL, ensuring
+the two representations stay consistent.
+
+### Vector-Indexed Dataset Embeddings
+
+Each processed scan's embedding (generated via MedSigLIP, see ADR-007) is stored in
+RuVector's HNSW index alongside the PostgreSQL registry. This enables semantic search
+across the entire dataset:
+
+- **"Find scans with similar tumor morphology"**: retrieve the k nearest scans by
+  embedding similarity, enabling case-based reasoning for MedGemma context windows.
+- **"Find cases with similar treatment response"**: when combined with RECIST metadata
+  (ADR-009), identify patients whose tumors responded similarly to a given therapy.
+- **"Find longitudinal matches"**: for a patient's current scan, retrieve the most
+  similar prior scans across the population to inform growth model priors (ADR-005).
+
+This enables population-level analysis beyond what a flat registry supports. RuVector's
+hybrid search combines vector similarity with Cypher graph filters:
+
+```python
+# Find similar scans restricted to a specific modality and organ
+similar_cases = ruvector_client.hybrid_search(HybridQuery(
+    vector=current_scan_embedding,
+    cypher_filter="WHERE n.modality = 'MRI_T1' AND n.organ = 'brain'",
+    k=10,
+))
+```
+
 ---
 
 ## Directory Structure
@@ -328,6 +386,8 @@ data/
 | `scipy`      | >=1.11    | Morphological operations for synthetic data   |
 | `requests`   | >=2.31    | TCIA API data download                        |
 | `tqdm`       | >=4.65    | Progress bars for data loading                |
+| `psycopg`    | >=3.1     | PostgreSQL client for dataset registry        |
+| `ruvector`   | >=0.1     | Vector indexing for scan embeddings           |
 
 ---
 
@@ -399,7 +459,10 @@ public datasets with clear licensing simplifies compliance.
 Considered for simplicity. Rejected because managing the time dimension,
 patient metadata, and spatial coordinates across multiple datasets with raw
 numpy arrays and dictionaries leads to fragile, error-prone code. xarray
-provides the minimal structure needed without the overhead of a full database.
+provides the minimal structure needed without the overhead of a full database
+for the in-memory data representation layer. Note that the persistent storage
+layer now uses PostgreSQL+RuVector (see alternative 7 below), while xarray
+remains the in-memory working format.
 
 ### 6. MONAI Dataset/Transform Pipeline
 
@@ -410,6 +473,18 @@ use case is different: we need patient-centric, time-ordered access for growth
 modeling. A custom xarray-based pipeline better fits this access pattern.
 MONAI transforms are still used for specific operations (e.g., resampling,
 intensity normalization) where they outperform SimpleITK.
+
+### 7. PostgreSQL+RuVector as Dataset Registry
+
+**Accepted.** The `ruvector-postgres` Docker image bundles PostgreSQL and RuVector
+into a single container, providing relational storage for the dataset registry and
+vector indexing for scan embeddings. This was accepted because: (a) PostgreSQL
+provides transactional integrity and SQL query capabilities that CSV lacks, (b)
+RuVector's HNSW index enables semantic similarity search across the dataset for
+population-level analysis and MedGemma context retrieval, and (c) the combined
+Docker image eliminates the infrastructure overhead of managing separate database
+and vector store services. The CSV-based registry is retained as a portable
+fallback for notebook environments.
 
 ---
 
