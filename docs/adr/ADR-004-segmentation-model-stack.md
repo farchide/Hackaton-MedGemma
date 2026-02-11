@@ -152,6 +152,68 @@ data/processed/{dataset_name}/{patient_id}/{timepoint}/
 
 ---
 
+### Vector-Indexed Segmentation Embeddings
+
+In addition to file-based mask storage, segmentation embeddings are indexed in
+RuVector for similarity-based retrieval. Each accepted mask is processed to
+extract a compact vector representation -- either a MedSigLIP embedding of the
+masked region or a shape descriptor vector (volume, surface area, sphericity,
+elongation, compactness, centroid position) -- and stored in RuVector's HNSW
+index.
+
+This enables three capabilities:
+
+**(a) Historical similarity lookup for quality comparison.** When a clinician
+reviews a new segmentation, the system retrieves the k most similar historical
+masks (by shape or visual appearance) and displays them alongside. This
+provides context: "This mask is consistent with previous segmentations of
+similar-sized lesions" or "This mask is unusually elongated compared to
+historical cases." This is particularly useful for catching segmentation
+errors that are geometrically plausible but clinically unusual.
+
+**(b) Anomalous segmentation detection.** By computing the distance from a new
+mask embedding to its nearest neighbors in the HNSW index, the system can flag
+outlier segmentations. A mask whose nearest-neighbor distance exceeds a
+threshold (calibrated from the existing corpus) triggers a warning:
+"This segmentation appears unusual -- please verify." This serves as an
+automated quality gate before the mask is accepted and passed to downstream
+growth model fitting.
+
+**(c) Evidence panel population.** The MedGemma evidence panel (Layer 6, see
+ADR-003) can be populated with visually similar segmented regions from other
+patients or other timepoints. RuVector's Cypher graph queries enable
+relationship-aware retrieval: for example, "find masks from the same organ
+with similar volume that showed treatment response."
+
+```python
+# Index a segmentation mask embedding in RuVector
+from ruvector import VectorDB, VectorEntry, SearchQuery
+
+mask_db = VectorDB(dimensions=128)  # Shape descriptor dimension
+
+# After mask acceptance, compute shape descriptor and index
+shape_vector = compute_shape_descriptor(mask_array, spacing)
+mask_db.insert(VectorEntry(
+    id=f"{patient_id}_{timepoint}_{lesion_id}_v{version}",
+    vector=shape_vector.tolist(),
+    metadata={
+        "patient_id": patient_id,
+        "lesion_id": lesion_id,
+        "timepoint": timepoint,
+        "volume_mm3": volume,
+        "method": provenance.method,
+        "status": "accepted",
+    }
+))
+
+# Retrieve similar masks for quality comparison
+similar = mask_db.search(SearchQuery(
+    vector=shape_vector.tolist(), k=5, include_vectors=False
+))
+```
+
+---
+
 ## Python Libraries
 
 | Library              | Version   | Purpose                                      |
@@ -164,6 +226,7 @@ data/processed/{dataset_name}/{patient_id}/{timepoint}/
 | `nibabel`            | >=5.0     | NIfTI read/write as a lighter alternative    |
 | `numpy`              | >=1.24    | Array operations                             |
 | `torch`              | >=2.0     | Model inference backend                      |
+| `ruvector`           | >=0.1     | Vector indexing for mask embeddings and similarity retrieval |
 
 ---
 
@@ -180,6 +243,10 @@ data/processed/{dataset_name}/{patient_id}/{timepoint}/
   be traced back to the exact segmentation that produced it.
 - **Kaggle compatibility.** Both MedSAM and nnU-Net can run on a single T4 GPU.
   MedSAM's ViT-B variant requires approximately 1.5 GB VRAM for inference.
+- **"Find similar lesion" for QA.** RuVector-indexed segmentation embeddings
+  enable automatic retrieval of historically similar masks, providing a
+  quality assurance mechanism that flags anomalous segmentations before they
+  propagate to growth model fitting.
 
 ### Negative
 
@@ -231,6 +298,31 @@ integration, but the Python tooling (`highdicom`) adds complexity without
 benefit in a Kaggle notebook environment. NIfTI with sidecar JSON is simpler
 and sufficient. Migration to DICOM-SEG can be added post-hackathon if clinical
 deployment is pursued.
+
+### 6. RuVector for Mask Similarity
+
+Use RuVector's HNSW index to store segmentation mask embeddings (shape
+descriptors and/or MedSigLIP visual embeddings) for similarity-based retrieval,
+anomaly detection, and cross-patient evidence panel population.
+
+- **Accepted** because:
+  - **Quality assurance**: Similarity search over historical masks provides an
+    automated quality gate. Anomalous segmentations (unusually shaped, wrong
+    organ boundary, segmentation leak) can be detected by their distance from
+    the nearest-neighbor cluster in embedding space.
+  - **Cross-patient context**: Clinicians benefit from seeing similar lesions
+    from other patients, especially for rare lesion morphologies. RuVector's
+    Cypher graph queries enable relationship-aware retrieval (e.g., same organ,
+    similar stage, same treatment).
+  - **Zero GPU cost**: RuVector runs on CPU, so mask embedding indexing and
+    retrieval do not compete with MedSAM or MedGemma for GPU VRAM.
+  - **GNN improvement**: RuVector's GNN layers learn from retrieval patterns,
+    improving the relevance of similar-mask suggestions over time as more cases
+    are processed and clinician feedback is recorded.
+  - **Alternatives considered**: FAISS provides fast HNSW search but lacks
+    graph queries and GNN self-improvement. Storing embeddings in PostgreSQL
+    with pgvector provides basic similarity search but without graph-aware
+    retrieval or self-improving index quality.
 
 ---
 

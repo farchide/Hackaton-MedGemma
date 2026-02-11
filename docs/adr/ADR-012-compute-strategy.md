@@ -130,6 +130,61 @@ def unload_model(model):
     gc.collect()
 ```
 
+### 2a. RuVector+PostgreSQL Deployment
+
+The `ruvnet/ruvector-postgres` Docker image provides PostgreSQL and RuVector combined
+in a single container, running alongside the application as a database tier. This
+container handles all persistent storage (audit logs, measurement history, patient
+metadata) and vector operations (lesion embeddings, similar case retrieval, GNN-enhanced
+search).
+
+**Docker Compose Configuration:**
+
+```yaml
+services:
+  ruvector-postgres:
+    image: ruvnet/ruvector-postgres:latest
+    ports:
+      - "5432:5432"
+      - "8080:8080"  # RuVector API
+    environment:
+      POSTGRES_DB: digital_twin_tumor
+      POSTGRES_USER: dtt
+      POSTGRES_PASSWORD: ${DTT_DB_PASSWORD}
+    volumes:
+      - ruvector_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  digital-twin-tumor:
+    build: .
+    ports:
+      - "7860:7860"
+    environment:
+      DATABASE_URL: postgresql://dtt:${DTT_DB_PASSWORD}@ruvector-postgres:5432/digital_twin_tumor
+      RUVECTOR_URL: http://ruvector-postgres:8080
+    depends_on:
+      - ruvector-postgres
+
+volumes:
+  ruvector_data:
+```
+
+**Resource Characteristics:**
+
+- RuVector runs entirely on CPU (no GPU required), using approximately 500MB-2GB RAM
+  depending on the size of the vector index and the number of stored embeddings.
+- The database tier does NOT affect GPU memory budget -- it runs as a separate CPU
+  process. GPU VRAM remains fully available for MedGemma, MedSAM, and other deep
+  learning models.
+- For Kaggle notebooks, where Docker is not available, RuVector can run as an
+  in-process library using Python bindings (no separate container needed). This mode
+  uses SQLite as the backing store and provides the same vector search API.
+- For Colab notebooks on the free tier, the in-process mode is also recommended to
+  avoid Docker overhead. Colab Pro and local environments use the full Docker deployment.
+
 ### 3. MedSAM Configuration
 
 MedSAM runs in inference mode with the following settings:
@@ -300,14 +355,14 @@ def detect_environment():
 
 Configuration is then selected from a predefined profile:
 
-| Profile         | MedGemma  | Precision | MedSAM | nnU-Net | Batch Size |
-|-----------------|-----------|-----------|--------|---------|------------|
-| `kaggle_t4`     | 4B        | float16   | GPU    | CPU     | 1          |
-| `colab_t4`      | 4B        | float16   | GPU    | CPU     | 1          |
-| `colab_a100`    | 27B       | float16   | GPU    | GPU     | 4          |
-| `local_16gb`    | 4B        | float16   | GPU    | GPU     | 2          |
-| `local_24gb`    | 4B        | bfloat16  | GPU    | GPU     | 4          |
-| `cpu_only`      | 4B        | int4+offload | CPU | CPU     | 1          |
+| Profile         | MedGemma  | Precision | MedSAM | nnU-Net | Batch Size | Database                        |
+|-----------------|-----------|-----------|--------|---------|------------|---------------------------------|
+| `kaggle_t4`     | 4B        | float16   | GPU    | CPU     | 1          | In-process RuVector (no Docker) |
+| `colab_t4`      | 4B        | float16   | GPU    | CPU     | 1          | In-process RuVector (no Docker) |
+| `colab_a100`    | 27B       | float16   | GPU    | GPU     | 4          | Docker RuVector-Postgres        |
+| `local_16gb`    | 4B        | float16   | GPU    | GPU     | 2          | Docker RuVector-Postgres        |
+| `local_24gb`    | 4B        | bfloat16  | GPU    | GPU     | 4          | Docker RuVector-Postgres        |
+| `cpu_only`      | 4B        | int4+offload | CPU | CPU     | 1          | In-process RuVector (no Docker) |
 
 ### 10. Python Dependencies
 
@@ -324,6 +379,8 @@ Configuration is then selected from a predefined profile:
 | `pydicom`       | >=2.4       | DICOM file I/O                               |
 | `numpy`         | >=1.24      | Array operations                             |
 | `scipy`         | >=1.10      | Growth model curve fitting                   |
+| `psycopg[binary]` | >=3.1    | PostgreSQL async client                       |
+| `ruvector`      | >=0.1       | Vector database client (in-process or remote) |
 
 ## Consequences
 
@@ -340,6 +397,8 @@ Configuration is then selected from a predefined profile:
 - The graceful degradation path (float16 -> int4 -> CPU offload) means the system
   produces results on any hardware, trading speed for accessibility.
 - MedGemma 27B support provides a quality upgrade path without requiring code changes.
+- The RuVector+PostgreSQL database tier runs entirely on CPU and does not consume any
+  GPU VRAM, keeping the full GPU memory budget available for deep learning models.
 
 ### Negative
 

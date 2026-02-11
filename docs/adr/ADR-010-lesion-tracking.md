@@ -120,6 +120,90 @@ Automatic identity matching proceeds in three stages:
 Unmatched lesions at T+1 are flagged as new lesion candidates. Unmatched lesions at T
 are flagged as potentially disappeared.
 
+### RuVector-Enhanced Lesion Matching
+
+For production and multi-patient deployments, RuVector's native graph and vector
+capabilities augment the NetworkX-based pipeline with persistent storage, GNN-enhanced
+matching, and expressive Cypher graph queries.
+
+#### Graph Storage in RuVector
+
+The lesion identity graph is stored in RuVector's graph engine, which provides:
+
+- **Persistent, queryable storage**: unlike the in-memory NetworkX graph, the RuVector
+  graph persists across sessions in the `ruvector-postgres` Docker container.
+- **Cypher query language**: all graph traversal operations are expressed as Cypher
+  queries, enabling complex clinical questions to be answered declaratively.
+- **Scalability**: RuVector's Raft consensus protocol supports horizontal scaling for
+  multi-institution deployments with hundreds of patients.
+
+#### GNN-Based Matching
+
+RuVector's GNN layer replaces the static centroid+embedding pipeline with a learned
+matching model that improves over time:
+
+- **Self-improving index**: the GNN layer learns from confirmed matches (both automatic
+  and human-verified) to improve future matching accuracy. Each confirmation is a
+  training signal that refines the model's internal representation.
+- **Contextual embeddings**: each lesion node has an embedding vector that the GNN
+  refines based on neighbor context (prior observations, co-occurring lesions, anatomical
+  location). This captures information that isolated centroid/appearance features miss.
+- **Multi-head attention**: the GNN uses MultiHeadAttention with 4 heads to weigh
+  spatial features (centroid proximity after registration), temporal features (time
+  interval between observations), and appearance features (MedSigLIP embedding
+  similarity). The attention weights are interpretable and can be inspected to understand
+  why a particular match was made.
+
+#### Hybrid Search for Matching
+
+RuVector's hybrid search combines vector similarity with graph constraints in a single
+query, replacing the sequential centroid-then-embedding pipeline:
+
+```python
+# RuVector hybrid search for lesion matching
+matches = ruvector_client.hybrid_search(HybridQuery(
+    vector=current_lesion_embedding,
+    cypher_filter="""
+        MATCH (l:Lesion)-[:OBSERVED_AT]->(t:Timepoint)
+        WHERE t.date < $current_date AND l.organ = $organ
+    """,
+    k=5,
+))
+```
+
+This approach is more expressive than the sequential pipeline because:
+
+- Graph constraints (same organ, prior timepoint) are applied simultaneously with
+  vector similarity, not as separate filtering stages.
+- The Cypher filter can encode arbitrarily complex clinical logic (e.g., exclude
+  lesions that have already been matched, restrict to lesions within a specific
+  anatomical region).
+
+#### Cypher Queries for Graph Operations
+
+All graph operations are expressed as Cypher queries:
+
+```cypher
+-- Get lesion trajectory
+MATCH (l:Lesion {id: 'L001'})-[:TRACKED_AS*]->(obs:Observation)
+RETURN obs ORDER BY obs.timepoint
+
+-- Find new lesions at a timepoint
+MATCH (obs:Observation {timepoint: '2025-06-15'})
+WHERE NOT (obs)<-[:TRACKED_AS]-()
+RETURN obs
+
+-- Get lineage with split/merge
+MATCH path = (start:Observation)-[:TRACKED_AS|SPLIT_FROM|MERGED_INTO*]->(end:Observation)
+WHERE start.lesion_id = 'L001'
+RETURN path
+
+-- Count active lesions per patient across all timepoints
+MATCH (p:Patient)-[:HAS_LESION]->(l:Lesion)-[:OBSERVED_AT]->(t:Timepoint)
+RETURN p.id, t.date, count(l) as active_count
+ORDER BY p.id, t.date
+```
+
 ### Human Override
 
 The system always allows a human operator to:
@@ -136,7 +220,13 @@ the audit trail (see ADR-011).
 ### Serialization
 
 The graph is serialized using `networkx.node_link_data()` which produces a JSON-
-compatible dictionary. One JSON file per patient is stored at:
+compatible dictionary. While JSON serialization is retained for portability and
+notebook environments, the primary storage for production deployments is RuVector's
+graph engine, which provides persistent, queryable storage via the `ruvector-postgres`
+Docker container. The JSON export serves as a snapshot/backup format and enables
+offline analysis without a running RuVector instance.
+
+One JSON file per patient is stored at:
 
 ```
 data/processed/{patient_id}/lesion_graph.json
@@ -190,6 +280,31 @@ The following graph queries are supported via utility functions:
 - `get_lineage(graph, node_id)` -- returns all ancestors and descendants of a node.
 - `validate_dag(graph)` -- asserts the graph is a valid DAG (no cycles).
 
+### RuVector Graph Query Utilities
+
+When RuVector is available, the utility functions above map to Cypher queries for
+persistent, indexed execution. The mapping is:
+
+| NetworkX Utility                  | RuVector Cypher Equivalent                                      |
+|-----------------------------------|-----------------------------------------------------------------|
+| `get_lesion_trajectory(g, lid)`   | `MATCH (l:Lesion {id: $lid})-[:TRACKED_AS*]->(o) RETURN o ORDER BY o.timepoint` |
+| `get_new_lesions(g, tp)`          | `MATCH (o:Observation {timepoint: $tp}) WHERE NOT (o)<-[:TRACKED_AS]-() RETURN o` |
+| `get_disappeared_lesions(g, tp)`  | `MATCH (o:Observation {timepoint: $prev_tp}) WHERE NOT (o)-[:TRACKED_AS]->() RETURN o` |
+| `get_active_lesions(g, tp)`       | `MATCH (o:Observation {timepoint: $tp}) RETURN o`               |
+| `get_lineage(g, nid)`             | `MATCH path = (n {id: $nid})-[:TRACKED_AS|SPLIT_FROM|MERGED_INTO*]-(m) RETURN path` |
+| `validate_dag(g)`                 | `MATCH (n)-[:TRACKED_AS*]->(n) RETURN count(n) = 0 as is_dag`  |
+
+A `LesionGraphBackend` abstraction layer provides a unified interface that delegates to
+either NetworkX (in-memory, Kaggle/notebook mode) or RuVector (persistent, production
+mode) based on configuration:
+
+```python
+class LesionGraphBackend(Protocol):
+    def get_trajectory(self, lesion_id: str) -> List[Observation]: ...
+    def get_new_lesions(self, timepoint: str) -> List[Observation]: ...
+    def find_matches(self, lesion_embedding: np.ndarray, constraints: dict) -> List[Match]: ...
+```
+
 ### Python Dependencies
 
 | Library     | Version   | Purpose                                      |
@@ -198,6 +313,8 @@ The following graph queries are supported via utility functions:
 | `SimpleITK` | >=2.3     | Image registration (rigid, affine)           |
 | `numpy`     | >=1.24    | Coordinate transforms, distance computation  |
 | `scipy`     | >=1.10    | Hungarian algorithm for matching             |
+| `ruvector`  | >=0.1     | Graph storage, GNN-enhanced matching, Cypher queries, hybrid search |
+| `psycopg`   | >=3.1     | PostgreSQL client for structured lesion metadata |
 
 ## Consequences
 
@@ -213,6 +330,14 @@ The following graph queries are supported via utility functions:
   notebooks for analysis.
 - The registration-then-proximity-then-embedding pipeline provides robust matching even
   with significant patient repositioning between scans.
+- GNN-enhanced matching improves over time with each confirmed match, creating a virtuous
+  cycle where the system becomes more accurate as more data is processed.
+- Cypher queries provide expressive graph traversal for complex clinical questions (e.g.,
+  "find all patients where a specific lesion split during treatment") without custom
+  traversal code.
+- Hybrid search combining spatial, temporal, and appearance features in a single RuVector
+  query replaces the sequential multi-stage matching pipeline with a more natural and
+  efficient approach.
 
 ### Negative
 
