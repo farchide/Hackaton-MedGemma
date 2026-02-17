@@ -1,0 +1,13 @@
+compute:
+  prefer_gpu: true
+  precision: "float16"
+  max_batch_size: 1
+  cache_dir: "/kaggle/working/.cache/models"
+
+storage:
+  backend: "sqlite"
+  sqlite_path: "/kaggle/working/.cache/digital_twin.db"
+
+medgemma:
+  max_context_tokens: 2048
+  max_evidence_slices: 3

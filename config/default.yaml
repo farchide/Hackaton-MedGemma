@@ -1,0 +1,71 @@
+app:
+  name: "Digital Twin Tumor"
+  version: "0.1.0"
+  debug: false
+
+imaging:
+  target_spacing: [1.0, 1.0, 1.0]
+  orientation: "RAS"
+  ct_window_presets:
+    soft_tissue: [-150, 250]
+    lung: [-1000, 200]
+    bone: [-500, 1500]
+    brain: [0, 80]
+    liver: [-20, 200]
+  mri_percentile_range: [1, 99]
+  slice_size: 512
+
+segmentation:
+  primary_model: "medsam"
+  fallback_model: "sam2"
+  confidence_threshold: 0.5
+  max_slices_for_evidence: 4
+
+growth_models:
+  models: ["gompertz", "exponential", "logistic"]
+  n_bootstrap: 1000
+  n_starts: 50
+  optimizer: "L-BFGS-B"
+
+recist:
+  max_targets_total: 5
+  max_targets_per_organ: 2
+  min_measurable_mm: 10.0
+  min_nodal_short_axis_mm: 15.0
+  pr_threshold: -30.0
+  pd_threshold: 20.0
+  pd_absolute_mm: 5.0
+
+uncertainty:
+  mc_dropout_passes: 10
+  ensemble_models: 3
+  bootstrap_samples: 100
+  default_sigma_manual: 1.5
+  prediction_interval_alpha: 0.2
+
+medgemma:
+  model_id: "google/medgemma-4b-it"
+  max_new_tokens: 1024
+  temperature: 0.3
+  top_p: 0.9
+  top_k: 50
+  max_evidence_slices: 4
+  max_context_tokens: 2048
+
+compute:
+  prefer_gpu: true
+  precision: "auto"
+  max_batch_size: 1
+  cache_dir: ".cache/models"
+
+storage:
+  backend: "sqlite"
+  sqlite_path: ".cache/digital_twin.db"
+  postgres:
+    host: "localhost"
+    port: 5432
+    database: "digital_twin"
+  ruvector:
+    url: "http://localhost:8080"
+    hnsw_m: 16
+    hnsw_ef_construction: 200
